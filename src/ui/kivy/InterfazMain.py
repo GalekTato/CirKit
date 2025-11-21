@@ -60,10 +60,10 @@ GRID = 20
 PIN_R = 9
 
 DESC = {
-    "R": "Resistor ideal. V = I·R.",
-    "V": "Fuente de voltaje ideal (diferencia de potencial constante).",
-    "D": "Diodo ideal: conduce del ánodo al cátodo (según polaridad).",
-    "J": "Nodo de unión (•). Sirve como punto común de conexión.",
+    "R": "Resistor ideal. Relación: V = I × R.\nOpone resistencia al flujo de corriente.",
+    "V": "Fuente de voltaje ideal.\nMantiene diferencia de potencial constante.",
+    "D": "Diodo ideal.\nConduce corriente del ánodo (A) al cátodo (K).",
+    "J": "Nodo de unión (•).\nPunto común para conectar múltiples cables.",
 }
 
 def snap(p):  # ajusta al grid
@@ -259,11 +259,13 @@ class Junction(Widget):
         super().__init__(**kw)
         self.size_hint = (None, None)
         self.size = (GRID, GRID)
+        self._drag = False
+        self._last_tap = 0.0
         self.bind(pos=self._redraw, size=self._redraw, selected=self._redraw)
         Clock.schedule_once(lambda *_: self._redraw(), 0)
 
     def collide_point(self, x, y):
-        return (abs(x - self.center_x) <= 8) and (abs(y - self.center_y) <= 8)
+        return (abs(x - self.center_x) <= 10) and (abs(y - self.center_y) <= 10)
 
     def on_touch_down(self, touch):
         parent = self.parent
@@ -271,8 +273,38 @@ class Junction(Widget):
             return False
         if not self.collide_point(*touch.pos):
             return super().on_touch_down(touch)
+        
+        now = time.time()
+        if now - self._last_tap < 0.35:
+            # Doble clic en junction (sin propiedades por ahora)
+            self._last_tap = 0
+            return True
+        self._last_tap = now
+        
         if hasattr(parent, "select_junction"):
             parent.select_junction(self)
+        self._drag = True
+        self._dx = touch.x - self.x
+        self._dy = touch.y - self.y
+        App.get_running_app().set_status(f"Seleccionado: {self.jid}")
+        return True
+
+    def on_touch_move(self, touch):
+        if not self._drag:
+            return super().on_touch_move(touch)
+        nx = round((touch.x - self._dx) / GRID) * GRID
+        ny = round((touch.y - self._dy) / GRID) * GRID
+        self.pos = (nx, ny)
+        if hasattr(self.parent, "redraw_wires"):
+            self.parent.redraw_wires()
+        return True
+
+    def on_touch_up(self, touch):
+        if not self._drag:
+            return super().on_touch_up(touch)
+        self._drag = False
+        if hasattr(self.parent, "redraw_wires"):
+            self.parent.redraw_wires()
         return True
 
     def world(self):
@@ -286,7 +318,7 @@ class Junction(Widget):
                 Rectangle(pos=(self.x - 6, self.y - 6),
                           size=(self.width + 12, self.height + 12))
             Color(0.93, 0.78, 0.18, 1)
-            Ellipse(pos=(self.center_x - 4, self.center_y - 4), size=(8, 8))
+            Ellipse(pos=(self.center_x - 5, self.center_y - 5), size=(10, 10))
 
 
 @dataclass
@@ -437,84 +469,100 @@ class CircuitCanvas(FloatLayout):
 
     # --------------- utilería ---------------
     def _hit_pin(self, x, y) -> Optional[Tuple[str, str]]:
-        for cid, cw in self.components.items():
-            for pname, (px, py) in cw.pin_world().items():
-                if (x - px) ** 2 + (y - py) ** 2 <= (PIN_R * 1.3) ** 2:
-                    return (cid, pname)
+        # Primero verificar junctions (prioridad)
         for jid, j in self.junctions.items():
             px, py = j.world()
-            if (x - px) ** 2 + (y - py) ** 2 <= (GRID * 0.6) ** 2:
+            if (x - px) ** 2 + (y - py) ** 2 <= (12) ** 2:
                 return (f"J:{jid}", "J")
+        
+        # Luego pines de componentes
+        for cid, cw in self.components.items():
+            for pname, (px, py) in cw.pin_world().items():
+                if (x - px) ** 2 + (y - py) ** 2 <= (PIN_R * 1.5) ** 2:
+                    return (cid, pname)
         return None
 
     def _get_obstacles(self) -> set:
+        """Obtiene obstáculos para el pathfinding (simplificado)"""
         occ = set()
-        # cuerpos
+        
+        # Solo marcar el centro de los componentes como obstáculo
         for cw in self.components.values():
-            cx, cy = cw.center
-            hw = (cw.width / 2 // GRID + 1) * GRID
-            hh = (cw.height / 2 // GRID + 1) * GRID
-            min_x, max_x = snap((cx - hw, 0))[0], snap((cx + hw, 0))[0]
-            min_y, max_y = snap((0, cy - hh))[1], snap((0, cy + hh))[1]
-            for x in range(min_x, max_x + GRID, GRID):
-                for y in range(min_y, max_y + GRID, GRID):
-                    occ.add((x, y))
-
-        # cables ya trazados
-        for w in self.wires:
-            if not w.pts:
-                continue
-            for i in range(0, len(w.pts) - 2, 2):
-                x1, y1 = snap((w.pts[i], w.pts[i + 1]))
-                x2, y2 = snap((w.pts[i + 2], w.pts[i + 3]))
-                if x1 == x2:
-                    for y in range(min(y1, y2), max(y1, y2) + GRID, GRID):
-                        occ.add((x1, y))
-                else:
-                    for x in range(min(x1, x2), max(x1, x2) + GRID, GRID):
-                        occ.add((x, y1))
-
-        def clear_neighborhood(x, y):
-            for dx, dy in [(0, 0), (GRID, 0), (-GRID, 0), (0, GRID), (0, -GRID)]:
-                occ.discard((x + dx, y + dy))
-
-        # “puertas” alrededor de pines/nodos
-        for cw in self.components.values():
-            for _, (px, py) in cw.pin_world().items():
-                xx, yy = snap((px, py))
-                clear_neighborhood(xx, yy)
-        for j in self.junctions.values():
-            xx, yy = snap(j.world())
-            clear_neighborhood(xx, yy)
-
+            cx, cy = snap(cw.center)
+            # Área reducida alrededor del componente
+            for dx in range(-GRID*2, GRID*3, GRID):
+                for dy in range(-GRID, GRID*2, GRID):
+                    occ.add((cx + dx, cy + dy))
+        
         return occ
 
-    def _find_path_astar(self, p1, p2) -> Optional[List[float]]:
-        start, goal = snap(p1), snap(p2)
-        occ = self._get_obstacles()
-        occ.discard(start)
-        occ.discard(goal)
+    def _find_path_simple(self, p1, p2) -> List[float]:
+        """Pathfinding simplificado: línea recta con esquinas ortogonales"""
+        x1, y1 = snap(p1)
+        x2, y2 = snap(p2)
+        
+        # Si están alineados horizontalmente o verticalmente, línea directa
+        if x1 == x2 or y1 == y2:
+            return [x1, y1, x2, y2]
+        
+        # Sino, crear dos segmentos ortogonales
+        # Probar ruta horizontal-vertical
+        mid_x = x2
+        mid_y = y1
+        return [x1, y1, mid_x, mid_y, x2, y2]
 
-        def h(a, b): return abs(a[0] - b[0]) + abs(a[1] - b[1])
+    def _find_path_astar(self, p1, p2) -> Optional[List[float]]:
+        """A* mejorado con mejor heurística"""
+        start, goal = snap(p1), snap(p2)
+        
+        # Primero intentar ruta simple
+        simple_path = self._find_path_simple(p1, p2)
+        
+        # Verificar si hay obstáculos en la ruta simple
+        occ = self._get_obstacles()
+        path_clear = True
+        for i in range(0, len(simple_path) - 2, 2):
+            x, y = snap((simple_path[i], simple_path[i + 1]))
+            if (x, y) in occ and (x, y) != start and (x, y) != goal:
+                path_clear = False
+                break
+        
+        if path_clear:
+            return simple_path
+        
+        # Si hay obstáculos, usar A* pero con límite de iteraciones
+        def h(a, b): 
+            return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
         open_set = []
         heapq.heappush(open_set, (h(start, goal), 0, start, [start]))
         visited = {start}
-        while open_set:
+        iterations = 0
+        max_iterations = 200  # Límite para evitar cuelgues
+        
+        while open_set and iterations < max_iterations:
+            iterations += 1
             f, g, pos, path = heapq.heappop(open_set)
+            
             if pos == goal:
                 return [c for pt in path for c in pt]
+            
             for dx, dy in [(0, GRID), (0, -GRID), (GRID, 0), (-GRID, 0)]:
                 nb = (pos[0] + dx, pos[1] + dy)
                 if not (self.x <= nb[0] <= self.right and self.y <= nb[1] <= self.top):
                     continue
-                if nb in occ or nb in visited:
+                if nb in visited:
                     continue
+                if nb in occ and nb != goal:
+                    continue
+                    
                 visited.add(nb)
                 g2 = g + GRID
                 f2 = g2 + h(nb, goal)
                 heapq.heappush(open_set, (f2, g2, nb, path + [nb]))
-        return None
+        
+        # Si A* falla, devolver ruta simple de todos modos
+        return simple_path
 
     def _clear_ghost(self):
         if self._ghost:
@@ -523,7 +571,8 @@ class CircuitCanvas(FloatLayout):
 
     def _pin_world(self, comp_id, pin):
         if comp_id.startswith("J:"):
-            return self.junctions[comp_id.split(":")[1]].world()
+            jid = comp_id.split(":", 1)[1]
+            return self.junctions[jid].world()
         return self.components[comp_id].pin_world()[pin]
 
     def _update_ghost(self, cursor_pos):
@@ -534,7 +583,9 @@ class CircuitCanvas(FloatLayout):
         hit = self._hit_pin(*cursor_pos)
         self._clear_ghost()
         self._ghost = InstructionGroup()
+        
         if not hit:
+            # Línea punteada al cursor
             self._ghost.add(Color(1.0, 0.3, 0.3, 0.6))
             self._ghost.add(
                 Line(points=[p1[0], p1[1], cursor_pos[0], cursor_pos[1]],
@@ -542,6 +593,7 @@ class CircuitCanvas(FloatLayout):
             )
             self.canvas.after.add(self._ghost)
             return
+        
         p2 = self._pin_world(*hit)
         pts = self._find_path_astar(p1, p2)
         if pts:
@@ -564,26 +616,26 @@ class CircuitCanvas(FloatLayout):
         if self.mode in ("add_R", "add_V", "add_D"):
             self.add_component(self.mode.split("_")[1])
             App.get_running_app().set_status(
-                "Componente agregado. Arrastra para mover."
+                "Componente agregado. Arrastra para mover o doble-clic para editar."
             )
             return True
 
         if self.mode == "add_J":
             self.add_junction()
-            App.get_running_app().set_status("Nodo agregado. Conéctalo con cables.")
+            App.get_running_app().set_status("Nodo agregado. Úsalo para conectar múltiples cables.")
             return True
 
         if self.mode == "wire":
             hit = self._hit_pin(*touch.pos)
             if not hit:
                 App.get_running_app().set_status(
-                    "❌ Click solo en pines (círculos dorados) o nodos (•)"
+                    "⚠️ Haz clic en un pin (círculo dorado) o nodo (punto amarillo)"
                 )
                 return True
             if not self._wire_first:
                 self._wire_first = hit
                 App.get_running_app().set_status(
-                    f"Primer pin: {hit[0]}:{hit[1]}. Ahora el segundo pin."
+                    f"✓ Primer punto: {hit[0]}. Ahora selecciona el segundo punto."
                 )
                 return True
             a = self._wire_first
@@ -591,7 +643,7 @@ class CircuitCanvas(FloatLayout):
             if a != b:
                 self._add_wire(a, b)
                 App.get_running_app().set_status(
-                    f"Cable: {a[0]}:{a[1]} → {b[0]}:{b[1]}"
+                    f"✓ Cable conectado: {a[0]} → {b[0]}"
                 )
             else:
                 App.get_running_app().set_status(
@@ -604,10 +656,10 @@ class CircuitCanvas(FloatLayout):
         if self.mode == "set_gnd":
             hit = self._hit_pin(*touch.pos)
             if not hit:
-                App.get_running_app().set_status("Selecciona un pin o nodo para GND.")
+                App.get_running_app().set_status("⚠️ Selecciona un pin o nodo para establecer como GND.")
                 return True
             self._gnd = hit
-            App.get_running_app().set_status(f"✅ GND fijada en {hit[0]}:{hit[1]}")
+            App.get_running_app().set_status(f"✓ Tierra (GND) establecida en: {hit[0]}")
             return True
 
         return False
@@ -632,7 +684,7 @@ class CircuitCanvas(FloatLayout):
         pts = self._find_path_astar(p1, p2)
         if not pts:
             App.get_running_app().set_status(
-                "No hay ruta limpia entre esos puntos."
+                "⚠️ No se pudo trazar el cable. Intenta reposicionar los componentes."
             )
             return
         w = Wire(a, b, pts=pts)
@@ -646,51 +698,73 @@ class CircuitCanvas(FloatLayout):
             return
         grp = InstructionGroup()
         grp.add(Color(0.02, 0.03, 0.05, 1))
-        grp.add(Line(points=w.pts, width=4, cap="round"))
+        grp.add(Line(points=w.pts, width=4, cap="round", joint="miter"))
         grp.add(Color(0.35, 0.80, 1.0, 1))
-        grp.add(Line(points=w.pts, width=2.2, cap="round"))
+        grp.add(Line(points=w.pts, width=2.2, cap="round", joint="miter"))
         self.canvas.after.add(grp)
         w.gfx = grp
 
     def redraw_wires(self):
         for w in self.wires:
-            w.pts = (
-                self._find_path_astar(self._pin_world(*w.a),
-                                      self._pin_world(*w.b)) or w.pts
-            )
-            self._draw_wire(w)
+            try:
+                new_pts = self._find_path_astar(
+                    self._pin_world(*w.a),
+                    self._pin_world(*w.b)
+                )
+                if new_pts:
+                    w.pts = new_pts
+                self._draw_wire(w)
+            except Exception:
+                # Si hay error al redibujar, mantener puntos anteriores
+                pass
 
     # --------------- conectividad ---------------
     def _connectivity_ok(self) -> Tuple[bool, str]:
+        """Verifica que el circuito esté correctamente conectado"""
+        if not self.components:
+            return False, "⚠️ Añade al menos un componente para simular."
+        
         uf = UF()
-        # cables
+        
+        # Unir todos los puntos conectados por cables
         for w in self.wires:
             uf.union(f"{w.a[0]}:{w.a[1]}", f"{w.b[0]}:{w.b[1]}")
 
+        # Recopilar todos los pines
         pins: List[Tuple[str, str]] = []
         for cid, cw in self.components.items():
             for pname in cw.pin_world().keys():
                 pins.append((cid, pname))
         for jid in self.junctions.keys():
             pins.append((f"J:{jid}", "J"))
+        
         if not pins:
-            return False, "Añade al menos un componente."
+            return False, "⚠️ Añade componentes al circuito."
 
+        # Agrupar pines conectados
         groups: Dict[str, List[Tuple[str, str]]] = {}
         for cid, pn in pins:
             r = uf.find(f"{cid}:{pn}")
             groups.setdefault(r, []).append((cid, pn))
 
+        # Asignar nombres a los nodos
         names: Dict[str, str] = {}
         k = 1
         if self._gnd:
-            names[uf.find(f"{self._gnd[0]}:{self._gnd[1]}")] = "GND"
+            gnd_key = uf.find(f"{self._gnd[0]}:{self._gnd[1]}")
+            names[gnd_key] = "GND"
+        
+        # Si no hay GND definido, usar el primer grupo
+        if "GND" not in names.values() and groups:
+            first_key = next(iter(groups.keys()))
+            names[first_key] = "GND"
+            
         for r in groups.keys():
             if r not in names:
                 names[r] = f"N{k}"
                 k += 1
 
-        # grafo de nodos
+        # Construir grafo de conectividad entre nodos
         adj: Dict[str, set] = {names[r]: set() for r in groups.keys()}
         used_nodes: set = set()
 
@@ -705,28 +779,29 @@ class CircuitCanvas(FloatLayout):
                 n1, n2 = pin2node["A"], pin2node["B"]
             elif cw.ctype == "V":
                 n1, n2 = pin2node["+"], pin2node["-"]
-            else:
+            else:  # Diodo
                 n1, n2 = pin2node["A"], pin2node["K"]
 
-            adj.setdefault(n1, set()).add(n2)
-            adj.setdefault(n2, set()).add(n1)
+            if n1 != n2:  # Solo agregar si son nodos diferentes
+                adj.setdefault(n1, set()).add(n2)
+                adj.setdefault(n2, set()).add(n1)
 
         if not used_nodes:
-            return False, "Coloca y conecta componentes antes de simular."
+            return False, "⚠️ Conecta los componentes con cables antes de simular."
 
-        if self._gnd:
-            ref_node = names[uf.find(f"{self._gnd[0]}:{self._gnd[1]}")]
-        else:
-            ref_node = next(iter(used_nodes))
+        # Verificar que GND esté definido
+        if "GND" not in used_nodes:
+            return False, "⚠️ Define un nodo como tierra (GND) usando el botón 'Tierra (GND)'."
 
+        # Verificar conectividad desde GND
         visited = set()
-        stack = [ref_node]
+        stack = ["GND"]
         while stack:
             u = stack.pop()
             if u in visited:
                 continue
             visited.add(u)
-            for v in adj.get(u, ()):
+            for v in adj.get(u, []):
                 if v not in visited:
                     stack.append(v)
 
@@ -734,17 +809,22 @@ class CircuitCanvas(FloatLayout):
         if not_reached:
             listado = ", ".join(sorted(not_reached))
             return False, (
-                "Hay subconjuntos aislados (nodos no alcanzados desde la referencia): "
-                f"{listado}. Conecta las ramas o fija GND en un nodo del lazo principal."
+                f"⚠️ Hay nodos aislados sin conexión a GND: {listado}. "
+                "Verifica que todos los componentes estén conectados."
             )
-        return True, "Conectividad OK."
+        
+        return True, "✓ Circuito conectado correctamente."
 
     # --------------- netlist ---------------
     def build_netlist(self) -> Netlist:
+        """Construye el netlist desde el canvas"""
         uf = UF()
+        
+        # Unir puntos conectados por cables
         for w in self.wires:
             uf.union(f"{w.a[0]}:{w.a[1]}", f"{w.b[0]}:{w.b[1]}")
 
+        # Recopilar pines
         pins = []
         for cid, cw in self.components.items():
             for pname in cw.pin_world().keys():
@@ -752,29 +832,37 @@ class CircuitCanvas(FloatLayout):
         for jid in self.junctions.keys():
             pins.append((f"J:{jid}", "J"))
 
+        # Agrupar por conectividad
         groups = {}
         for cid, pn in pins:
             r = uf.find(f"{cid}:{pn}")
             groups.setdefault(r, []).append((cid, pn))
 
+        # Asignar nombres a nodos
         names = {}
         k = 1
         if self._gnd:
-            names[uf.find(f"{self._gnd[0]}:{self._gnd[1]}")] = "GND"
+            gnd_key = uf.find(f"{self._gnd[0]}:{self._gnd[1]}")
+            names[gnd_key] = "GND"
+        
         if "GND" not in names.values() and groups:
             first_key = next(iter(groups.keys()))
             names[first_key] = "GND"
+            
         for r in groups.keys():
             if r not in names:
                 names[r] = f"N{k}"
                 k += 1
 
+        # Crear netlist
         nl = Netlist()
         for r in groups.keys():
             nl.add_node(names[r], is_ground=(names[r] == "GND"))
 
+        # Agregar componentes
         for cid, cw in self.components.items():
             mp = {pn: names[uf.find(f"{cid}:{pn}")] for pn in cw.pin_world().keys()}
+            
             if cw.ctype == "R":
                 nl.add_component(
                     Resistor(
@@ -789,7 +877,7 @@ class CircuitCanvas(FloatLayout):
                         V=float(cw.props.get("V", 5.0))
                     )
                 )
-            else:
+            else:  # Diodo
                 nl.add_component(
                     IdealDiode(
                         id=cid, n1=mp["A"], n2=mp["K"],
@@ -804,44 +892,50 @@ class CircuitCanvas(FloatLayout):
             ok, msg = self._connectivity_ok()
             app = App.get_running_app()
             if not ok:
-                app.root.ids.lbl_info.text = msg
+                app.root.ids.lbl_info.text = f"[color=#ff6666]{msg}[/color]"
                 app.set_status(msg)
                 return
+            
             nl = self.build_netlist()
             sol = simulate(nl)
             app.show_results(sol)
-            app.set_status("Simulación lista.")
+            app.set_status("✓ Simulación completada exitosamente.")
         except Exception as e:
             app = App.get_running_app()
-            app.set_status(f"Error: {e}")
+            error_msg = f"❌ Error: {str(e)}"
+            app.set_status(error_msg)
             app.info_popup("Error de simulación", str(e))
 
     def export_pdf_from_canvas(self):
-        """
-        1) valida conectividad
-        2) simula
-        3) screenshot canvas → base64
-        4) diálogo 'Guardar como' para el PDF
-        """
+        """Exporta el circuito y resultados a PDF"""
         try:
             ok, msg = self._connectivity_ok()
             app = App.get_running_app()
             if not ok:
-                app.root.ids.lbl_info.text = msg
+                app.root.ids.lbl_info.text = f"[color=#ff6666]{msg}[/color]"
                 app.set_status(msg)
                 return
 
             nl = self.build_netlist()
             sol = simulate(nl)
 
+            # Preparar datos de solución
             solution = {
                 "node_voltages": dict(getattr(sol, "node_voltages", {})),
                 "branch_currents": dict(getattr(sol, "branch_currents", {})),
-                "kcl": dict(getattr(sol, "kcl", {})) if hasattr(sol, "kcl") else {},
-                "kvl": dict(getattr(sol, "kvl", {})) if hasattr(sol, "kvl") else {},
-                "netlist": nl.to_dict() if hasattr(nl, "to_dict") else {},
+                "kcl": {},
+                "kvl": {},
+                "netlist": self._netlist_to_dict(nl),
             }
+            
+            # Extraer checks si existen
+            if hasattr(sol, "checks") and sol.checks:
+                kcl_data = sol.checks.get("KCL", {})
+                kvl_data = sol.checks.get("KVL", {})
+                solution["kcl"] = {k: v.get("ok", False) for k, v in kcl_data.items()}
+                solution["kvl"] = {k: v.get("ok", False) for k, v in kvl_data.items()}
 
+            # Capturar imagen del canvas
             tmp_path = os.path.join(tempfile.gettempdir(), "cirkit_canvas.png")
             self.export_to_png(tmp_path)
             with open(tmp_path, "rb") as f:
@@ -851,7 +945,9 @@ class CircuitCanvas(FloatLayout):
             except OSError:
                 pass
 
-            root = tk.Tk(); root.withdraw()
+            # Diálogo para guardar
+            root = tk.Tk()
+            root.withdraw()
             fname = filedialog.asksaveasfilename(
                 title="Guardar reporte PDF",
                 defaultextension=".pdf",
@@ -859,31 +955,56 @@ class CircuitCanvas(FloatLayout):
                 initialfile="reporte_cirkit.pdf",
             )
             root.destroy()
+            
             if not fname:
-                App.get_running_app().set_status("Exportación cancelada.")
+                app.set_status("Exportación cancelada.")
                 return
 
             export_solution_pdf(fname, solution, diagram=self.to_json(), png_b64=png_b64)
-            app.info_popup("PDF", f"PDF exportado en:\n{fname}")
-            app.set_status("PDF exportado.")
+            app.info_popup("PDF Exportado", f"Reporte guardado exitosamente en:\n{fname}")
+            app.set_status("✓ PDF exportado correctamente.")
         except Exception as e:
             app = App.get_running_app()
-            app.set_status(f"Error: {e}")
+            app.set_status(f"❌ Error al exportar: {e}")
             app.info_popup("Error de exportación", str(e))
+
+    def _netlist_to_dict(self, nl: Netlist) -> Dict[str, Any]:
+        """Convierte netlist a diccionario para exportación"""
+        elements = []
+        for c in nl.components:
+            elem = {
+                "type": c.kind,
+                "name": c.id,
+                "a": c.n1,
+                "b": c.n2,
+            }
+            if c.kind == "R":
+                elem["value"] = c.R
+            elif c.kind == "V":
+                elem["value"] = c.V
+            elements.append(elem)
+        return {"elements": elements}
 
     # --------------- serialización ---------------
     def to_json(self) -> Dict[str, Any]:
         return {
             "components": [
                 {
-                    "id": cw.cid, "type": cw.ctype,
-                    "x": cw.center_x, "y": cw.center_y,
-                    "rot": cw.rot, "props": dict(cw.props),
+                    "id": cw.cid, 
+                    "type": cw.ctype,
+                    "x": float(cw.center_x), 
+                    "y": float(cw.center_y),
+                    "rot": int(cw.rot), 
+                    "props": dict(cw.props),
                 }
                 for cw in self.components.values()
             ],
             "junctions": [
-                {"id": jid, "x": j.center_x, "y": j.center_y}
+                {
+                    "id": jid, 
+                    "x": float(j.center_x), 
+                    "y": float(j.center_y)
+                }
                 for jid, j in self.junctions.items()
             ],
             "wires": [{"a": w.a, "b": w.b} for w in self.wires],
@@ -891,7 +1012,7 @@ class CircuitCanvas(FloatLayout):
         }
 
     def from_json(self, data: Dict[str, Any]):
-        # limpiar
+        # Limpiar canvas
         for w in self.wires:
             if w.gfx:
                 self.canvas.after.remove(w.gfx)
@@ -907,16 +1028,21 @@ class CircuitCanvas(FloatLayout):
         self._gnd = None
         self._idc = {"R": 1, "V": 1, "D": 1, "J": 1}
 
-        # componentes
+        # Cargar componentes con sus posiciones originales
         for c in data.get("components", []):
             cw = CompWidget(
-                cid=c["id"], ctype=c["type"],
+                cid=c["id"], 
+                ctype=c["type"],
                 rot=int(c.get("rot", 0)),
                 props=c.get("props", {}),
             )
-            cw.center = (c["x"], c["y"])
+            # IMPORTANTE: usar las coordenadas guardadas
+            cw.center_x = c.get("x", self.center_x)
+            cw.center_y = c.get("y", self.center_y)
             self.add_widget(cw)
             self.components[cw.cid] = cw
+            
+            # Actualizar contador
             t = cw.ctype
             try:
                 n = int("".join(filter(str.isdigit, cw.cid)))
@@ -924,28 +1050,39 @@ class CircuitCanvas(FloatLayout):
                 n = 0
             self._idc[t] = max(self._idc[t], n + 1)
 
-        # nodos
+        # Cargar junctions con sus posiciones originales
         for j in data.get("junctions", []):
             jj = Junction(jid=j["id"])
-            jj.center = (j["x"], j.get("y", 0))
+            # IMPORTANTE: usar las coordenadas guardadas
+            jj.center_x = j.get("x", self.center_x)
+            jj.center_y = j.get("y", self.center_y)
             self.add_widget(jj)
             self.junctions[jj.jid] = jj
+            
+            # Actualizar contador
             try:
                 n = int("".join(filter(str.isdigit, jj.jid)))
             except Exception:
                 n = 0
             self._idc["J"] = max(self._idc["J"], n + 1)
 
-        # cables
-        for w in data.get("wires", []):
-            self._add_wire(tuple(w["a"]), tuple(w["b"]))
+        # Cargar cables con delay para asegurar que los widgets estén listos
+        def cargar_cables(*args):
+            for w in data.get("wires", []):
+                try:
+                    self._add_wire(tuple(w["a"]), tuple(w["b"]))
+                except Exception as e:
+                    print(f"Error al cargar cable: {e}")
+            self.redraw_wires()
+        
+        # Usar Clock para dar tiempo a que se rendericen los widgets
+        Clock.schedule_once(cargar_cables, 0.1)
 
-        # gnd
+        # Cargar GND
         gnd_data = data.get("gnd")
         self._gnd = tuple(gnd_data) if isinstance(gnd_data, list) else gnd_data
 
-        self.redraw_wires()
-        App.get_running_app().set_status("Diagrama cargado.")
+        App.get_running_app().set_status("✓ Diagrama cargado correctamente.")
 
     # --------------- propiedades ---------------
     def open_properties(self, cw: "CompWidget"):
@@ -992,12 +1129,16 @@ class CircuitCanvas(FloatLayout):
                 App.get_running_app().update_inspector(cw)
                 cw._redraw()
             except Exception as e:
-                App.get_running_app().set_status(f"Error: {e}")
+                App.get_running_app().set_status(f"❌ Error: {e}")
 
-        b1 = Button(text="Aceptar"); b1.bind(on_release=_ok)
-        b2 = Button(text="Cancelar"); b2.bind(on_release=lambda *_: p.dismiss())
-        btns.add_widget(b1); btns.add_widget(b2)
+        b1 = Button(text="Aceptar")
+        b1.bind(on_release=_ok)
+        b2 = Button(text="Cancelar")
+        b2.bind(on_release=lambda *_: p.dismiss())
+        btns.add_widget(b1)
+        btns.add_widget(b2)
         box.add_widget(btns)
+        
         p = Popup(
             title=f"Propiedades: {title} {cw.cid}",
             content=box, size_hint=(0.5, 0.4),
@@ -1017,7 +1158,7 @@ def _base_assets_dir() -> pathlib.Path:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         return pathlib.Path(meipass)
-    return pathlib.Path(__file__).resolve().parents[2]  # .../src/ui
+    return pathlib.Path(__file__).resolve().parents[2]
 
 
 def _icons_dir() -> pathlib.Path:
@@ -1040,7 +1181,7 @@ class CirKitApp(App):
         super().__init__(**kwargs)
         self.kv_file = ""
 
-        # recursos (solo app icon)
+        # Recursos (solo app icon)
         icons = _icons_dir()
         resource_add_path(str(icons))
         try:
@@ -1053,7 +1194,7 @@ class CirKitApp(App):
         except Exception:
             pass
 
-        # tamaño/estado de ventana
+        # Tamaño/estado de ventana
         try:
             Window.minimum_width  = 1100
             Window.minimum_height = 650
@@ -1067,7 +1208,7 @@ class CirKitApp(App):
         kv_path = str(pathlib.Path(__file__).with_suffix(".kv"))
         return Builder.load_file(kv_path)
 
-    # -------- helpers seguros --------
+    # -------- Helpers seguros --------
     def _get_root_widget(self):
         return self.root
 
@@ -1106,12 +1247,12 @@ class CirKitApp(App):
         lbl = ids.get("lbl_info")
         if lbl is None:
             return
-        lines = ["[b]=== RESULTADOS ===[/b]", "[b]Voltajes nodales:[/b]"]
+        lines = ["[b][color=#4CAF50]=== RESULTADOS ===[/color][/b]", "", "[b]Voltajes nodales:[/b]"]
         for k, v in sol.node_voltages.items():
-            lines.append(f"• {k}: {v:.6f} V")
-        lines += ["", "[b]Corrientes:[/b]"]
+            lines.append(f"  [color=#90CAF9]•[/color] {k}: [b]{v:.6f} V[/b]")
+        lines += ["", "[b]Corrientes de rama:[/b]"]
         for k, i in sol.branch_currents.items():
-            lines.append(f"• {k}: {i:.9f} A")
+            lines.append(f"  [color=#90CAF9]•[/color] {k}: [b]{i:.9f} A[/b]")
         lbl.markup = True
         lbl.text = "\n".join(lines)
 
@@ -1131,7 +1272,8 @@ class CirKitApp(App):
             self.info_popup("Error", "No se encontró el canvas para guardar.")
             return
         try:
-            root = tk.Tk(); root.withdraw()
+            root = tk.Tk()
+            root.withdraw()
             fname = filedialog.asksaveasfilename(
                 title="Guardar diagrama (.json)",
                 defaultextension=".json",
@@ -1146,6 +1288,7 @@ class CirKitApp(App):
             with open(fname, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             self.info_popup("Guardar", f"Diagrama guardado en:\n{fname}")
+            self.set_status("✓ Diagrama guardado correctamente.")
         except Exception as e:
             self.info_popup("Error al Guardar", str(e))
 
@@ -1156,18 +1299,20 @@ class CirKitApp(App):
             self.info_popup("Error", "No se encontró el canvas para abrir.")
             return
         try:
-            root = tk.Tk(); root.withdraw()
+            root = tk.Tk()
+            root.withdraw()
             fname = filedialog.askopenfilename(
                 title="Abrir diagrama (.json)",
                 filetypes=[("Diagramas CirKit", "*.json"), ("Todos los archivos", "*.*")],
             )
             root.destroy()
             if not fname:
+                self.set_status("Apertura cancelada.")
                 return
             with open(fname, "r", encoding="utf-8") as f:
                 data = json.load(f)
             canvas.from_json(data)
-            self.info_popup("Abrir", f"Configuración cargada:\n{fname}")
+            self.info_popup("Abrir", f"Diagrama cargado desde:\n{fname}")
         except Exception as e:
             self.info_popup("Error al Abrir", str(e))
 
@@ -1177,41 +1322,117 @@ class CirKitApp(App):
         if not ids:
             return
 
-        box = BoxLayout(orientation="vertical", spacing=10, padding=14)
-        tips = (
-            "1) En la barra elige R, V, D o Nodo.\n"
-            "2) Colócalos en el canvas (ajuste al grid).\n"
-            "3) Usa 'Cable' para conectar pines/nodos.\n"
-            "4) Usa 'Tierra (GND)' en el nodo de referencia.\n"
-            "5) Doble clic sobre un componente para editar su valor.\n"
-            "6) 'Simular' muestra voltajes y corrientes.\n"
-            "7) 'Exportar PDF' guarda un reporte con captura del esquema."
+        box = BoxLayout(orientation="vertical", spacing=12, padding=16)
+        
+        # Título con estilo
+        title_lbl = Label(
+            text="[b][size=20]Guía Rápida de CirKit[/size][/b]",
+            markup=True,
+            size_hint_y=None,
+            height="40dp"
         )
-        lbl = Label(text=tips, halign="left", valign="top")
-        lbl.bind(size=lambda *_: setattr(lbl, "text_size", (lbl.width, None)))
-        box.add_widget(lbl)
+        box.add_widget(title_lbl)
+        
+        # Instrucciones detalladas
+        tips = (
+            "[b]Pasos para construir tu circuito:[/b]\n\n"
+            "[color=#4CAF50]1. Agregar componentes:[/color]\n"
+            "   • Haz clic en 'Resistor (R)', 'Fuente (V)' o 'Diodo (D)'\n"
+            "   • El componente aparecerá en el centro del canvas\n"
+            "   • Arrástralo a la posición deseada\n\n"
+            "[color=#4CAF50]2. Editar valores:[/color]\n"
+            "   • Haz [b]doble clic[/b] sobre un componente\n"
+            "   • Cambia su resistencia, voltaje o polaridad\n\n"
+            "[color=#4CAF50]3. Conectar con cables:[/color]\n"
+            "   • Selecciona 'Cable' en la barra de herramientas\n"
+            "   • Haz clic en el primer pin (círculo dorado)\n"
+            "   • Luego haz clic en el segundo pin\n"
+            "   • El cable se trazará automáticamente\n\n"
+            "[color=#4CAF50]4. Usar nodos (•):[/color]\n"
+            "   • Los nodos sirven para conectar 3 o más cables\n"
+            "   • Agrega un nodo y conéctalo con 'Cable'\n\n"
+            "[color=#4CAF50]5. Establecer tierra (GND):[/color]\n"
+            "   • Selecciona 'Tierra (GND)' en la barra\n"
+            "   • Haz clic en el nodo de referencia\n"
+            "   • Es necesario para la simulación\n\n"
+            "[color=#4CAF50]6. Simular:[/color]\n"
+            "   • Presiona 'Simular' para calcular voltajes y corrientes\n"
+            "   • Los resultados aparecerán en el panel derecho\n\n"
+            "[color=#2196F3][b]¡Prueba las plantillas de ejemplo para aprender más rápido![/b][/color]"
+        )
+        
+        lbl = Label(
+            text=tips,
+            markup=True,
+            halign="left",
+            valign="top",
+            size_hint_y=None
+        )
+        lbl.bind(
+            texture_size=lambda *_: setattr(lbl, "height", lbl.texture_size[1])
+        )
+        lbl.bind(
+            size=lambda *_: setattr(lbl, "text_size", (lbl.width - 20, None))
+        )
+        
+        from kivy.uix.scrollview import ScrollView
+        scroll = ScrollView(size_hint=(1, 1))
+        scroll.add_widget(lbl)
+        box.add_widget(scroll)
 
-        def _tpl_btn(txt, loader):
-            b = Button(text=txt, size_hint_y=None, height="42dp")
+        # Separador
+        sep_lbl = Label(
+            text="[b]Plantillas de ejemplo:[/b]",
+            markup=True,
+            size_hint_y=None,
+            height="30dp"
+        )
+        box.add_widget(sep_lbl)
+
+        # Botones de plantillas
+        def _tpl_btn(txt, desc, loader):
+            btn_box = BoxLayout(orientation="vertical", size_hint_y=None, height="60dp", spacing=2)
+            b = Button(text=txt, size_hint_y=None, height="35dp")
             b.bind(on_release=lambda *_: loader())
-            return b
+            desc_lbl = Label(text=f"[size=11]{desc}[/size]", markup=True, size_hint_y=None, height="20dp")
+            btn_box.add_widget(b)
+            btn_box.add_widget(desc_lbl)
+            return btn_box
 
-        btns = BoxLayout(size_hint_y=None, height="48dp", spacing=8)
-        btns.add_widget(_tpl_btn("Plantilla 1: V–R–GND",
-                      lambda: self.load_template("plantilla_1")))
-        btns.add_widget(_tpl_btn("Plantilla 2: V–D–GND",
-                      lambda: self.load_template("plantilla_2")))
-        btns.add_widget(_tpl_btn("Plantilla 3: Serie R1–R2 con V",
-                      lambda: self.load_template("plantilla_3")))
-        btns.add_widget(_tpl_btn("Plantilla 4: Nodo común (R y D)",
-                      lambda: self.load_template("plantilla_4")))
-        box.add_widget(btns)
+        grid = BoxLayout(orientation="vertical", size_hint_y=None, spacing=6)
+        grid.bind(minimum_height=grid.setter("height"))
+        
+        grid.add_widget(_tpl_btn(
+            "Circuito básico: V-R-GND",
+            "Una fuente de voltaje conectada a una resistencia",
+            lambda: self.load_template("plantilla_1")
+        ))
+        grid.add_widget(_tpl_btn(
+            "Circuito con diodo: V-D-GND",
+            "Fuente de voltaje con un diodo",
+            lambda: self.load_template("plantilla_2")
+        ))
+        grid.add_widget(_tpl_btn(
+            "Divisor de voltaje: V-R1-R2",
+            "Dos resistencias en serie para dividir el voltaje",
+            lambda: self.load_template("plantilla_3")
+        ))
+        grid.add_widget(_tpl_btn(
+            "Circuito con nodo compartido",
+            "Resistencia y diodo en paralelo usando un nodo común",
+            lambda: self.load_template("plantilla_4")
+        ))
+        
+        box.add_widget(grid)
 
-        close_bar = BoxLayout(size_hint_y=None, height="48dp", spacing=8)
-        p = Popup(title="Tutorial rápido de CirKit", content=box, size_hint=(0.8, 0.8))
-        bclose = Button(text="Cerrar"); bclose.bind(on_release=lambda *_: p.dismiss())
+        # Botón cerrar
+        close_bar = BoxLayout(size_hint_y=None, height="48dp", spacing=8, padding=[0, 10, 0, 0])
+        p = Popup(title="Tutorial de CirKit", content=box, size_hint=(0.85, 0.9))
+        bclose = Button(text="Cerrar", size_hint_y=None, height="40dp")
+        bclose.bind(on_release=lambda *_: p.dismiss())
         close_bar.add_widget(bclose)
         box.add_widget(close_bar)
+        
         p.open()
 
     def load_template(self, name: str):
@@ -1220,51 +1441,131 @@ class CirKitApp(App):
         if not canvas:
             return
 
-        # helpers
-        def place(cw, x, y, rot=0):
-            cw.center = (x, y); cw.rot = rot; canvas.add_widget(cw)
-        def wire(a, ap, b, bp):
-            canvas._add_wire(
-                (a.cid if hasattr(a, "cid") else f"J:{a.jid}", ap),
-                (b.cid if hasattr(b, "cid") else f"J:{b.jid}", bp)
-            )
-
-        # limpiar
+        # Limpiar canvas primero
         canvas.from_json({"components": [], "junctions": [], "wires": [], "gnd": None})
 
-        cx, cy = canvas.center_x, canvas.center_y
-        if name == "plantilla_1":  # V–R–GND
-            v = CompWidget(cid="V1", ctype="V", props={"V": 5.0}); place(v, cx-200, cy,   90)
-            r = CompWidget(cid="R1", ctype="R", props={"R": 1000}); place(r, cx-60,  cy,   0)
-            g = Junction(jid="J1"); place(g, cx+100, cy, 0)
-            wire(v, "+", r, "A"); wire(r, "B", g, "J"); wire(v, "-", g, "J")
-            canvas._gnd = (f"J:{g.jid}", "J")
-        elif name == "plantilla_2":  # V–D–GND
-            v = CompWidget(cid="V1", ctype="V", props={"V": 5.0}); place(v, cx-200, cy, 90)
-            d = CompWidget(cid="D1", ctype="D", props={"polarity": "A_to_K"}); place(d, cx-60, cy, 0)
-            g = Junction(jid="J1"); place(g, cx+100, cy, 0)
-            wire(v, "+", d, "A"); wire(d, "K", g, "J"); wire(v, "-", g, "J")
-            canvas._gnd = (f"J:{g.jid}", "J")
-        elif name == "plantilla_3":  # V con R1–R2 en serie
-            v = CompWidget(cid="V1", ctype="V", props={"V": 12.0}); place(v, cx-240, cy, 90)
-            r1 = CompWidget(cid="R1", ctype="R", props={"R": 1000}); place(r1, cx-100, cy, 0)
-            r2 = CompWidget(cid="R2", ctype="R", props={"R": 2000}); place(r2, cx+40,  cy, 0)
-            g = Junction(jid="J1"); place(g, cx+180, cy, 0)
-            wire(v, "+", r1, "A"); wire(r1, "B", r2, "A"); wire(r2, "B", g, "J"); wire(v, "-", g, "J")
-            canvas._gnd = (f"J:{g.jid}", "J")
-        else:  # plantilla_4: nodo común (R y D en paralelo)
-            v = CompWidget(cid="V1", ctype="V", props={"V": 9.0}); place(v, cx-260, cy, 90)
-            jtop = Junction(jid="J1"); jbot = Junction(jid="J2")
-            place(jtop, cx-60, cy+30, 0); place(jbot, cx-60, cy-30, 0)
-            r = CompWidget(cid="R1", ctype="R", props={"R": 470}); place(r, cx+60, cy+30, 0)
-            d = CompWidget(cid="D1", ctype="D", props={"polarity": "A_to_K"}); place(d, cx+60, cy-30, 0)
-            g = Junction(jid="J3"); place(g, cx+200, cy, 0)
-            wire(v, "+", jtop, "J"); wire(jtop, "J", r, "A"); wire(r, "B", g, "J")
-            wire(v, "-", jbot, "J"); wire(jbot, "J", d, "A"); wire(d, "K", g, "J")
-            canvas._gnd = (f"J:{g.jid}", "J")
+        # Esperar a que el canvas se renderice y obtener su centro real
+        def crear_plantilla(*args):
+            # Helper para agregar cables (con delay para asegurar que los widgets estén listos)
+            cables_pendientes = []
+            
+            def place_comp(cid, ctype, props, x, y, rot=0):
+                cw = CompWidget(cid=cid, ctype=ctype, props=props)
+                cw.rot = rot
+                # Asegurar que las coordenadas sean válidas
+                cw.center_x = float(x)
+                cw.center_y = float(y)
+                canvas.add_widget(cw)
+                canvas.components[cid] = cw
+                # Actualizar contador
+                try:
+                    n = int("".join(filter(str.isdigit, cid)))
+                    canvas._idc[ctype] = max(canvas._idc[ctype], n + 1)
+                except:
+                    pass
+                return cw
+                
+            def place_junction(jid, x, y):
+                j = Junction(jid=jid)
+                # Asegurar que las coordenadas sean válidas
+                j.center_x = float(x)
+                j.center_y = float(y)
+                canvas.add_widget(j)
+                canvas.junctions[jid] = j
+                # Actualizar contador
+                try:
+                    n = int("".join(filter(str.isdigit, jid)))
+                    canvas._idc["J"] = max(canvas._idc["J"], n + 1)
+                except:
+                    pass
+                return j
+                
+            def wire(a, ap, b, bp):
+                # Guardar para procesar después
+                aid = a.cid if hasattr(a, "cid") else f"J:{a.jid}"
+                bid = b.cid if hasattr(b, "cid") else f"J:{b.jid}"
+                cables_pendientes.append(((aid, ap), (bid, bp)))
 
-        canvas.redraw_wires()
-        self.set_status(f"Plantilla cargada: {name}")
+            # Obtener centro del canvas
+            cx = canvas.center_x if canvas.width > 0 else 640
+            cy = canvas.center_y if canvas.height > 0 else 350
+            
+            if name == "plantilla_1":  # Circuito básico: V-R-GND
+                v = place_comp("V1", "V", {"V": 5.0}, cx - 200, cy, 90)
+                r = place_comp("R1", "R", {"R": 1000}, cx - 60, cy, 0)
+                g = place_junction("J1", cx + 100, cy)
+                
+                wire(v, "+", r, "A")
+                wire(r, "B", g, "J")
+                wire(v, "-", g, "J")
+                
+                canvas._gnd = (f"J:{g.jid}", "J")
+                
+            elif name == "plantilla_2":  # Circuito con diodo: V-D-GND
+                v = place_comp("V1", "V", {"V": 5.0}, cx - 200, cy, 90)
+                d = place_comp("D1", "D", {"polarity": "A_to_K"}, cx - 60, cy, 0)
+                g = place_junction("J1", cx + 100, cy)
+                
+                wire(v, "+", d, "A")
+                wire(d, "K", g, "J")
+                wire(v, "-", g, "J")
+                
+                canvas._gnd = (f"J:{g.jid}", "J")
+                
+            elif name == "plantilla_3":  # Divisor de voltaje: V con R1-R2 en serie
+                v = place_comp("V1", "V", {"V": 12.0}, cx - 240, cy, 90)
+                r1 = place_comp("R1", "R", {"R": 1000}, cx - 100, cy, 0)
+                r2 = place_comp("R2", "R", {"R": 2000}, cx + 40, cy, 0)
+                g = place_junction("J1", cx + 180, cy)
+                
+                wire(v, "+", r1, "A")
+                wire(r1, "B", r2, "A")
+                wire(r2, "B", g, "J")
+                wire(v, "-", g, "J")
+                
+                canvas._gnd = (f"J:{g.jid}", "J")
+                
+            else:  # plantilla_4: Nodo común (R y D en paralelo)
+                v = place_comp("V1", "V", {"V": 9.0}, cx - 260, cy, 90)
+                jtop = place_junction("J1", cx - 60, cy + 30)
+                jbot = place_junction("J2", cx - 60, cy - 30)
+                r = place_comp("R1", "R", {"R": 470}, cx + 60, cy + 30, 0)
+                d = place_comp("D1", "D", {"polarity": "A_to_K"}, cx + 60, cy - 30, 0)
+                g = place_junction("J3", cx + 200, cy)
+                
+                wire(v, "+", jtop, "J")
+                wire(jtop, "J", r, "A")
+                wire(r, "B", g, "J")
+                wire(v, "-", jbot, "J")
+                wire(jbot, "J", d, "A")
+                wire(d, "K", g, "J")
+                
+                canvas._gnd = (f"J:{g.jid}", "J")
+
+            # Procesar cables después de que todos los widgets estén creados
+            def agregar_cables(*args):
+                for a, b in cables_pendientes:
+                    try:
+                        canvas._add_wire(a, b)
+                    except Exception as e:
+                        print(f"Error al agregar cable {a} -> {b}: {e}")
+                canvas.redraw_wires()
+            
+            # Usar Clock.schedule_once para dar tiempo a que se rendericen los widgets
+            Clock.schedule_once(agregar_cables, 0.15)
+            
+            # Mensajes descriptivos por plantilla
+            messages = {
+                "plantilla_1": "✓ Circuito básico cargado. Una fuente de 5V alimenta una resistencia de 1kΩ.",
+                "plantilla_2": "✓ Circuito con diodo cargado. El diodo permite el flujo de corriente en una dirección.",
+                "plantilla_3": "✓ Divisor de voltaje cargado. Las resistencias dividen el voltaje de 12V proporcionalmente.",
+                "plantilla_4": "✓ Circuito con nodo común cargado. R y D comparten conexiones en paralelo.",
+            }
+            
+            self.set_status(messages.get(name, f"✓ Plantilla {name} cargada."))
+        
+        # Dar tiempo a que el canvas se limpie y renderice
+        Clock.schedule_once(crear_plantilla, 0.1)
 
 
 # -------------------------------------------------

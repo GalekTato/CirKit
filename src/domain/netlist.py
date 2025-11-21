@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Any
 from .node import Node
 from .components.base import Component
 
@@ -24,3 +24,26 @@ class Netlist:
             if n.is_ground:
                 return k
         raise ValueError("Falta nodo de tierra (GND).")
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convierte el netlist a un diccionario serializable"""
+        elements = []
+        for c in self.components:
+            elem = {
+                "type": c.kind,
+                "name": c.id,
+                "a": c.n1,
+                "b": c.n2,
+            }
+            if c.kind == "R":
+                elem["value"] = c.R
+            elif c.kind == "V":
+                elem["value"] = c.V
+            elif c.kind == "D":
+                elem["polarity"] = getattr(c, "polarity", "A_to_K")
+            elements.append(elem)
+        
+        return {
+            "nodes": [{"id": n.id, "is_ground": n.is_ground} for n in self.nodes.values()],
+            "elements": elements
+        }

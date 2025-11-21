@@ -135,34 +135,60 @@
                 height: dp(28)
 
             GridLayout:
-                cols: 2
+                cols: 1
                 row_default_height: dp(26)
                 size_hint_y: None
                 height: self.minimum_height
+                spacing: dp(4)
 
-                Label:
-                    text: "ID:"
-                    color: 0.9,0.9,0.9,1
-                Label:
-                    id: ins_name
-                    text: "-"
-                    color: 0.9,0.9,0.9,1
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(26)
+                    Label:
+                        text: "ID:"
+                        color: 0.9,0.9,0.9,1
+                        size_hint_x: 0.3
+                    Label:
+                        id: ins_name
+                        text: "-"
+                        color: 0.9,0.9,0.9,1
+                        size_hint_x: 0.7
 
-                Label:
-                    text: "Valor:"
-                    color: 0.9,0.9,0.9,1
-                Label:
-                    id: ins_value
-                    text: "-"
-                    color: 0.9,0.9,0.9,1
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(26)
+                    Label:
+                        text: "Valor:"
+                        color: 0.9,0.9,0.9,1
+                        size_hint_x: 0.3
+                    Label:
+                        id: ins_value
+                        text: "-"
+                        color: 0.9,0.9,0.9,1
+                        size_hint_x: 0.7
 
-                Label:
-                    text: "Descripción:"
-                    color: 0.9,0.9,0.9,1
+            Label:
+                text: "Descripción:"
+                color: 0.9,0.9,0.9,1
+                size_hint_y: None
+                height: dp(22)
+                
+            ScrollView:
+                size_hint_y: None
+                height: dp(80)
+                do_scroll_x: False
+                do_scroll_y: True
+                
                 Label:
                     id: ins_desc
                     text: "-"
                     color: 0.9,0.9,0.9,1
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width - dp(10), None
+                    halign: 'left'
+                    valign: 'top'
+                    padding: dp(5), dp(5)
 
             Label:
                 text: "Resultados"
@@ -172,13 +198,20 @@
                 size_hint_y: None
                 height: dp(24)
 
-            Label:
-                id: lbl_info
-                text: "-"
-                markup: True
-                halign: 'left'
-                valign: 'top'
-                text_size: self.width, None
+            ScrollView:
+                do_scroll_x: False
+                do_scroll_y: True
+                
+                Label:
+                    id: lbl_info
+                    text: "-"
+                    markup: True
+                    halign: 'left'
+                    valign: 'top'
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width - dp(10), None
+                    padding: dp(5), dp(5)
 
     # --------- STATUS BAR ----------
     BoxLayout:
