@@ -1,0 +1,34 @@
+# Entorno virtual
+.venv/
+Env/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos temporales
+*.log
+*.tmp
+*.bak
+
+# Compilados PyInstaller
+build/
+dist/
+*.spec
+
+# Kivy cache
+*.kivy
+
+# Configuración local
+.vscode/
+.idea/
+
+# Archivos generados
+*.png
+*.pdf
+Thumbs.db
+
+# Configuración específica de usuario
+*.ini
+*.cfg
